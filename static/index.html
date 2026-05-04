@@ -63,7 +63,10 @@
           <div class="result-icon">✅</div>
           <h3>변환 완료!</h3>
           <p id="resultMessage"></p>
-          <button id="downloadBtn" class="btn-download">📥 엑셀 파일 다운로드</button>
+          <div class="result-actions">
+            <button id="downloadBtn" class="btn-download">📥 엑셀 파일 다운로드</button>
+            <button id="previewBtn" class="btn-preview">👁 미리보기</button>
+          </div>
           <button id="convertAgainBtn" class="btn-again">다른 파일 변환하기</button>
         </div>
       </div>
@@ -76,6 +79,24 @@
           <button id="retryBtn" class="btn-again">다시 시도하기</button>
         </div>
       </div>
+
+      <!-- 미리보기 모달 -->
+      <div id="previewModal" class="modal hidden">
+        <div class="modal-backdrop"></div>
+        <div class="modal-box">
+          <div class="modal-header">
+            <h3>📊 엑셀 미리보기</h3>
+            <div class="modal-header-actions">
+              <span id="previewInfo" class="preview-info"></span>
+              <button id="modalDownloadBtn" class="btn-modal-download">📥 다운로드</button>
+              <button id="closeModal" class="btn-close">✕</button>
+            </div>
+          </div>
+          <div id="previewContent" class="preview-content">
+            <div class="preview-loading">데이터를 불러오는 중...</div>
+          </div>
+        </div>
+      </div>
     </main>
 
     <footer>
@@ -83,6 +104,7 @@
     </footer>
   </div>
 
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>
