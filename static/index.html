@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PDF → Excel 변환기</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="logo">📄→📊</div>
+      <h1>PDF → Excel 변환기</h1>
+      <p class="subtitle">PDF 파일을 엑셀로 자동 변환합니다. 표, 텍스트, 스캔 이미지 모두 지원합니다.</p>
+    </header>
+
+    <main>
+      <div class="upload-section">
+        <div id="dropzone" class="dropzone">
+          <div class="dropzone-icon">📂</div>
+          <p class="dropzone-text">PDF 파일을 여기에 드래그하거나 클릭해서 선택하세요</p>
+          <p class="dropzone-hint">최대 50MB · PDF 파일만 지원</p>
+          <input type="file" id="fileInput" accept=".pdf" hidden />
+        </div>
+
+        <div id="filePreview" class="file-preview hidden">
+          <div class="file-info">
+            <span class="file-icon">📄</span>
+            <div class="file-details">
+              <span id="fileName" class="file-name"></span>
+              <span id="fileSize" class="file-size"></span>
+            </div>
+            <button id="removeFile" class="btn-remove">✕</button>
+          </div>
+        </div>
+
+        <div class="options">
+          <label for="langSelect">OCR 언어 (스캔 PDF 전용)</label>
+          <select id="langSelect">
+            <option value="kor+eng">한국어 + 영어 (기본)</option>
+            <option value="eng">영어만</option>
+            <option value="kor">한국어만</option>
+            <option value="jpn+eng">일본어 + 영어</option>
+            <option value="chi_sim+eng">중국어(간체) + 영어</option>
+          </select>
+        </div>
+
+        <button id="convertBtn" class="btn-convert" disabled>
+          <span id="btnText">변환하기</span>
+          <span id="btnSpinner" class="spinner hidden"></span>
+        </button>
+      </div>
+
+      <div id="progressSection" class="progress-section hidden">
+        <div class="progress-bar">
+          <div id="progressFill" class="progress-fill"></div>
+        </div>
+        <p id="progressText" class="progress-text">변환 중...</p>
+      </div>
+
+      <div id="resultSection" class="result-section hidden">
+        <div class="result-card success">
+          <div class="result-icon">✅</div>
+          <h3>변환 완료!</h3>
+          <p id="resultMessage"></p>
+          <button id="downloadBtn" class="btn-download">📥 엑셀 파일 다운로드</button>
+          <button id="convertAgainBtn" class="btn-again">다른 파일 변환하기</button>
+        </div>
+      </div>
+
+      <div id="errorSection" class="error-section hidden">
+        <div class="result-card error">
+          <div class="result-icon">❌</div>
+          <h3>변환 실패</h3>
+          <p id="errorMessage"></p>
+          <button id="retryBtn" class="btn-again">다시 시도하기</button>
+        </div>
+      </div>
+    </main>
+
+    <footer>
+      <p>텍스트 PDF · 표 추출 · 스캔 OCR 지원</p>
+    </footer>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
