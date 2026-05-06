@@ -290,13 +290,16 @@ def convert_pdf_to_excel(pdf_path: str, lang: str = "kor+eng") -> bytes:
     ws = wb.active
     ws.title = "변환 결과"
 
-    # 기본 컬럼 너비 설정
-    for c in range(1, NUM_COLS + 1):
-        ws.column_dimensions[get_column_letter(c)].width = 11
-
     current_row = 1
 
     with pdfplumber.open(pdf_path) as pdf:
+        # 첫 페이지 너비 기준으로 컬럼 너비 비례 설정
+        # PDF pt → Excel 문자 단위: A4(595pt) 기준 전체 너비 ≈ 85 chars
+        first_page_width = pdf.pages[0].width if pdf.pages else 595
+        total_excel_width = first_page_width * 0.143   # pt → Excel char 단위
+        col_width = round(total_excel_width / NUM_COLS, 1)
+        for c in range(1, NUM_COLS + 1):
+            ws.column_dimensions[get_column_letter(c)].width = col_width
         # 스캔 페이지 감지 및 OCR 이미지 준비
         scanned = [i for i, p in enumerate(pdf.pages) if is_scanned_page(p)]
         page_imgs = {}
