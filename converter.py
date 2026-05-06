@@ -133,10 +133,8 @@ def write_table(ws, table, start_row, col_start=1, col_end=NUM_COLS):
     spans, merged = detect_spans(table)
     grid = [list(r) + [None] * (cols - len(r)) if r else [None] * cols for r in table]
 
-    thin   = Side(style="thin", color="AAAAAA")
+    thin   = Side(style="thin", color="000000")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
-    h_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-    e_fill = PatternFill(start_color="EEF3FF", end_color="EEF3FF", fill_type="solid")
 
     # 테이블 컬럼 → Excel 컬럼 매핑 (테이블 내 균등 분배)
     total_excel_cols = col_end - col_start + 1
@@ -145,7 +143,6 @@ def write_table(ws, table, start_row, col_start=1, col_end=NUM_COLS):
 
     for i, row in enumerate(grid):
         excel_row = start_row + i
-        is_header = (i == 0)
 
         for j in range(cols):
             if (i, j) in merged:
@@ -155,7 +152,6 @@ def write_table(ws, table, start_row, col_start=1, col_end=NUM_COLS):
             val = safe_value(row[j])
             rs, cs = spans.get((i, j), [1, 1])
 
-            # 병합 먼저 처리 (값 쓰기 전에)
             ec_end_row = excel_row + rs - 1
             if cs > 1:
                 ec_end_col = tbl_col_to_excel(j + cs) - 1
@@ -174,16 +170,7 @@ def write_table(ws, table, start_row, col_start=1, col_end=NUM_COLS):
             cell.border = border
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-            if is_header:
-                cell.fill = h_fill
-                cell.font = Font(bold=True, color="FFFFFF", size=9)
-            elif i % 2 == 0:
-                cell.fill = e_fill
-                cell.font = Font(size=9)
-            else:
-                cell.font = Font(size=9)
-
-        ws.row_dimensions[excel_row].height = 28
+        ws.row_dimensions[excel_row].height = 20
 
     return start_row + rows
 
@@ -334,18 +321,6 @@ def convert_pdf_to_excel(pdf_path: str, lang: str = "kor+eng") -> bytes:
         for page_num, page in enumerate(pdf.pages, start=1):
             pi = page_num - 1  # 0-indexed
             page_img = page_imgs.get(pi)
-
-            # 페이지 구분 헤더
-            cell = ws.cell(row=current_row, column=1, value=f"[ {page_num} 페이지 ]")
-            cell.font = Font(bold=True, size=11, color="FFFFFF")
-            cell.fill = PatternFill(start_color="2E4057", end_color="2E4057", fill_type="solid")
-            cell.alignment = Alignment(vertical="center")
-            ws.merge_cells(
-                start_row=current_row, start_column=1,
-                end_row=current_row, end_column=NUM_COLS,
-            )
-            ws.row_dimensions[current_row].height = 22
-            current_row += 1
 
             if is_scanned_page(page) and page_img:
                 text = ocr_page(page_img, lang)
