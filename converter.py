@@ -364,11 +364,15 @@ def convert_pdf_to_excel(pdf_path: str, lang: str = "kor+eng") -> bytes:
 
                         band_rows = max(text_rows, img_rows)
 
-                        # 텍스트: 각 줄을 해당 서브행에 배치
+                        # 텍스트: 각 줄을 해당 서브행에 배치 + bbox 범위만큼 셀 병합
                         for elem in text_elems:
                             col_s, col_e = bbox_to_cols(elem['bbox'][0], elem['bbox'][2], page.width, NUM_COLS)
                             subrow = top_to_subrow.get(round(elem['bbox'][1]), 0)
-                            cell = ws.cell(row=current_row + subrow, column=col_s, value=safe_value(elem['data']))
+                            r = current_row + subrow
+                            if col_e > col_s:
+                                ws.merge_cells(start_row=r, start_column=col_s,
+                                               end_row=r,   end_column=col_e)
+                            cell = ws.cell(row=r, column=col_s, value=safe_value(elem['data']))
                             cell.font = Font(size=9)
                             cell.alignment = Alignment(vertical="center", wrap_text=True)
 
