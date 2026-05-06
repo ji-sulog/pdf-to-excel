@@ -123,7 +123,7 @@ def detect_spans(table):
 
 # ── 테이블 쓰기 ──────────────────────────────────────────
 
-def write_table(ws, table, start_row, col_start=1, col_end=NUM_COLS):
+def write_table(ws, table, start_row, col_start=1, col_end=NUM_COLS, row_heights=None):
     """테이블을 워크시트에 씁니다 (병합 셀 포함)."""
     if not table:
         return start_row
@@ -170,7 +170,9 @@ def write_table(ws, table, start_row, col_start=1, col_end=NUM_COLS):
             cell.border = border
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-        ws.row_dimensions[excel_row].height = 20
+        # PDF 행 높이 반영 (없으면 기본 16pt)
+        h = row_heights[i] if row_heights and i < len(row_heights) else 16
+        ws.row_dimensions[excel_row].height = max(10, h)
 
     return start_row + rows
 
@@ -186,7 +188,15 @@ def collect_elements(page, page_img=None, lang="kor+eng"):
     for tobj in page.find_tables():
         data = tobj.extract()
         if data:
-            elements.append({'type': 'table', 'bbox': tobj.bbox, 'data': data})
+            # 각 행의 PDF 높이 계산 (rows 속성 활용)
+            row_heights = []
+            try:
+                for trow in tobj.rows:
+                    h = trow.bbox[3] - trow.bbox[1]
+                    row_heights.append(max(10, h))
+            except Exception:
+                row_heights = None
+            elements.append({'type': 'table', 'bbox': tobj.bbox, 'data': data, 'row_heights': row_heights})
             table_bboxes.append(tobj.bbox)
 
     # 이미지 (최소 크기 이상만)
@@ -341,7 +351,8 @@ def convert_pdf_to_excel(pdf_path: str, lang: str = "kor+eng") -> bytes:
                     if item['kind'] == 'table':
                         elem = item['elem']
                         col_s, col_e = bbox_to_cols(elem['bbox'][0], elem['bbox'][2], page.width, NUM_COLS)
-                        end_row = write_table(ws, elem['data'], current_row, col_s, col_e)
+                        end_row = write_table(ws, elem['data'], current_row, col_s, col_e,
+                                              row_heights=elem.get('row_heights'))
                         current_row = end_row + 1
 
                     elif item['kind'] == 'band':
@@ -351,16 +362,26 @@ def convert_pdf_to_excel(pdf_path: str, lang: str = "kor+eng") -> bytes:
                         text_elems = [e for e in band if e['type'] == 'text']
                         img_elems  = [e for e in band if e['type'] == 'image']
 
-                        # 텍스트 줄별 y → 서브행 인덱스 매핑
+                        # 텍스트 줄별 y → 서브행 인덱스 + 행 높이 매핑
                         unique_tops = sorted(set(round(e['bbox'][1]) for e in text_elems))
                         top_to_subrow = {t: i for i, t in enumerate(unique_tops)}
                         text_rows = len(unique_tops) if unique_tops else 1
 
-                        # 이미지 높이 기반 최소 행 수
+                        # 서브행별 높이: 해당 줄 요소들의 bbox 높이 최댓값 (PDF pt ≈ Excel pt)
+                        subrow_height = {}
+                        for e in text_elems:
+                            si = top_to_subrow.get(round(e['bbox'][1]), 0)
+                            h = max(10, e['bbox'][3] - e['bbox'][1])
+                            subrow_height[si] = max(subrow_height.get(si, 0), h)
+
+                        # 이미지: 총 높이 기반 행 수 계산
                         img_rows = 1
+                        img_total_h = 0
                         for e in img_elems:
                             h_pt = e['bbox'][3] - e['bbox'][1]
-                            img_rows = max(img_rows, max(1, int(h_pt / 14)))
+                            img_total_h = max(img_total_h, h_pt)
+                        if img_total_h > 0:
+                            img_rows = max(1, int(img_total_h / 14))
 
                         band_rows = max(text_rows, img_rows)
 
@@ -389,10 +410,10 @@ def convert_pdf_to_excel(pdf_path: str, lang: str = "kor+eng") -> bytes:
                             xl_img.height = int(h_pt * 1.8)
                             ws.add_image(xl_img, f"{get_column_letter(col_s)}{current_row}")
 
-                        for r in range(current_row, current_row + band_rows):
-                            h = ws.row_dimensions[r].height
-                            if h is None or h < 14:
-                                ws.row_dimensions[r].height = 14
+                        # 서브행별 높이 적용 (PDF pt → Excel pt 직접 사용, 최소 10)
+                        for si in range(band_rows):
+                            row_h = subrow_height.get(si, 14)
+                            ws.row_dimensions[current_row + si].height = max(10, row_h)
                         current_row += band_rows + 1
 
             current_row += 2  # 페이지 여백
