@@ -7,17 +7,17 @@ import re
 import io
 import pdfplumber
 import pytesseract
-from pdf2image import convert_from_path
+import fitz  # pymupdf
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.drawing.image import Image as XLImage
 from PIL import Image as PILImage
 
-_ILLEGAL_CHARS = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
+_ILLEGAL_CHARS = re.compile(r'[\x01-\x08\x0b\x0c\x0e-\x1f]')
 
 # 페이지 전체 너비를 나눌 Excel 컬럼 수
-NUM_COLS = 12
+NUM_COLS = 20
 
 
 # ── 유틸리티 ─────────────────────────────────────────────
@@ -27,7 +27,11 @@ def safe_value(v):
         return None
     if isinstance(v, (int, float, bool)):
         return v
-    cleaned = _ILLEGAL_CHARS.sub('', str(v)).strip()
+    s = str(v)
+    # \x00이 단어 문자 사이에 있을 때만 하이픈으로, 나머지는 제거
+    s = re.sub(r'(?<=\w)\x00(?=\w)', '-', s)
+    s = s.replace('\x00', '')
+    cleaned = _ILLEGAL_CHARS.sub('', s).strip()
     return cleaned if cleaned else None
 
 
@@ -51,6 +55,48 @@ def bbox_to_cols(x0, x1, page_width, num_cols=NUM_COLS):
     col_start = x_to_col(x0, page_width, num_cols)
     col_end   = x_to_col(x1, page_width, num_cols)
     return col_start, max(col_start, col_end)
+
+
+# ── 폰트 크기 정규화 ─────────────────────────────────────
+
+def normalize_font_size(pt):
+    """PDF 포인트 크기를 Excel에서 보기 좋은 크기로 정규화"""
+    if not pt or pt <= 0:
+        return 9
+    if pt <= 8:
+        return 9
+    if pt <= 12:
+        return round(pt)
+    return min(round(pt * 0.75), 20)
+
+
+# ── 셀 병합 안전 함수 ────────────────────────────────────
+
+def safe_merge(ws, start_row, start_column, end_row, end_column):
+    """기존 병합과 충돌하지 않을 때만 셀 병합."""
+    if start_row == end_row and start_column == end_column:
+        return
+    try:
+        ws.merge_cells(
+            start_row=start_row, start_column=start_column,
+            end_row=end_row,     end_column=end_column,
+        )
+    except Exception:
+        pass
+
+
+# ── 텍스트 정렬 추론 ─────────────────────────────────────
+
+def infer_alignment(x0, x1, page_width):
+    """bbox x 좌표로 텍스트 정렬 추론 (left/center/right)"""
+    center_x = (x0 + x1) / 2
+    if x0 < page_width * 0.08:
+        return "left"
+    if center_x > page_width * 0.62:
+        return "right"
+    if center_x > page_width * 0.32:
+        return "center"
+    return "left"
 
 
 # ── 이미지 추출 ──────────────────────────────────────────
@@ -121,9 +167,36 @@ def detect_spans(table):
     return spans, merged
 
 
+# ── A4 페이지 테두리 ─────────────────────────────────────
+
+def draw_page_border(ws, start_row, end_row, start_col, end_col):
+    """A4 페이지 영역 외곽에 굵은 테두리를 그린다."""
+    from openpyxl.cell.cell import MergedCell
+    thick = Side(style='medium', color='000000')
+
+    for row in range(start_row, end_row + 1):
+        for col in range(start_col, end_col + 1):
+            is_top    = row == start_row
+            is_bottom = row == end_row
+            is_left   = col == start_col
+            is_right  = col == end_col
+            if not (is_top or is_bottom or is_left or is_right):
+                continue
+            cell = ws.cell(row=row, column=col)
+            if isinstance(cell, MergedCell):
+                continue
+            b = cell.border
+            cell.border = Border(
+                left   = thick if is_left   else b.left,
+                right  = thick if is_right  else b.right,
+                top    = thick if is_top    else b.top,
+                bottom = thick if is_bottom else b.bottom,
+            )
+
+
 # ── 테이블 쓰기 ──────────────────────────────────────────
 
-def write_table(ws, table, start_row, col_start=1, col_end=NUM_COLS, row_heights=None):
+def write_table(ws, table, start_row, col_start=1, col_end=NUM_COLS, row_heights=None, col_boundaries=None):
     """테이블을 워크시트에 씁니다 (병합 셀 포함)."""
     if not table:
         return start_row
@@ -136,10 +209,20 @@ def write_table(ws, table, start_row, col_start=1, col_end=NUM_COLS, row_heights
     thin   = Side(style="thin", color="000000")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    # 테이블 컬럼 → Excel 컬럼 매핑 (테이블 내 균등 분배)
     total_excel_cols = col_end - col_start + 1
-    def tbl_col_to_excel(j):
-        return col_start + int(j / cols * total_excel_cols)
+
+    # PDF 컬럼 경계 좌표가 있으면 비례 매핑, 없으면 균등 분배
+    if col_boundaries and len(col_boundaries) >= cols + 1:
+        tbl_x0 = col_boundaries[0]
+        tbl_width = col_boundaries[-1] - tbl_x0
+        def tbl_col_to_excel(j):
+            if j >= len(col_boundaries) - 1:
+                return col_end + 1
+            rel = (col_boundaries[j] - tbl_x0) / tbl_width
+            return col_start + int(rel * total_excel_cols)
+    else:
+        def tbl_col_to_excel(j):
+            return col_start + int(j / cols * total_excel_cols)
 
     for i, row in enumerate(grid):
         excel_row = start_row + i
@@ -153,26 +236,26 @@ def write_table(ws, table, start_row, col_start=1, col_end=NUM_COLS, row_heights
             rs, cs = spans.get((i, j), [1, 1])
 
             ec_end_row = excel_row + rs - 1
-            if cs > 1:
-                ec_end_col = tbl_col_to_excel(j + cs) - 1
-                ec_end_col = max(ec, min(col_end, ec_end_col))
+            if j + cs >= cols:
+                ec_end_col = col_end
             else:
-                ec_end_col = ec
+                ec_end_col = tbl_col_to_excel(j + cs) - 1
+            ec_end_col = max(ec, min(col_end, ec_end_col))
 
             if ec_end_row > excel_row or ec_end_col > ec:
-                ws.merge_cells(
-                    start_row=excel_row, start_column=ec,
-                    end_row=ec_end_row,  end_column=ec_end_col,
-                )
+                safe_merge(ws, excel_row, ec, ec_end_row, ec_end_col)
 
             cell = ws.cell(row=excel_row, column=ec)
             cell.value = val
             cell.border = border
+            cell.font = Font(size=9)
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-        # PDF 행 높이 반영 (없으면 기본 16pt)
+        # PDF 행 높이 반영, 셀 내 줄 수 기반 최소 높이 보장
         h = row_heights[i] if row_heights and i < len(row_heights) else 16
-        ws.row_dimensions[excel_row].height = max(10, h)
+        max_lines = max((str(row[j] or '').count('\n') + 1 for j in range(cols)), default=1)
+        min_h = max_lines * 14
+        ws.row_dimensions[excel_row].height = max(min_h, h)
 
     return start_row + rows
 
@@ -196,7 +279,9 @@ def collect_elements(page, page_img=None, lang="kor+eng"):
                     row_heights.append(max(10, h))
             except Exception:
                 row_heights = None
-            elements.append({'type': 'table', 'bbox': tobj.bbox, 'data': data, 'row_heights': row_heights})
+            col_boundaries = sorted(set(c[0] for c in tobj.cells)) + [tobj.bbox[2]]
+            elements.append({'type': 'table', 'bbox': tobj.bbox, 'data': data,
+                             'row_heights': row_heights, 'col_boundaries': col_boundaries})
             table_bboxes.append(tobj.bbox)
 
     # 이미지 (최소 크기 이상만)
@@ -219,7 +304,7 @@ def collect_elements(page, page_img=None, lang="kor+eng"):
             })
 
     # 텍스트 (테이블 외부, 한 줄씩 독립 요소로)
-    words = page.extract_words()
+    words = page.extract_words(extra_attrs=['size'])
     non_tbl = [
         w for w in words
         if not any(
@@ -241,13 +326,32 @@ def collect_elements(page, page_img=None, lang="kor+eng"):
         if cur_line:
             lines.append(cur_line)
 
+        gap_threshold = page.width / NUM_COLS * 1.5  # 약 1.5 컬럼 너비 이상 = 별도 요소
         for line in lines:
-            x0  = min(w['x0']     for w in line)
-            x1  = max(w['x1']     for w in line)
-            top = min(w['top']    for w in line)
-            bot = max(w['bottom'] for w in line)
-            txt = ' '.join(w['text'] for w in line)
-            elements.append({'type': 'text', 'bbox': (x0, top, x1, bot), 'data': txt})
+            # x 간격이 큰 곳에서 분리
+            sorted_words = sorted(line, key=lambda w: w['x0'])
+            groups, cur_group = [], [sorted_words[0]]
+            for word in sorted_words[1:]:
+                if word['x0'] - cur_group[-1]['x1'] > gap_threshold:
+                    groups.append(cur_group)
+                    cur_group = [word]
+                else:
+                    cur_group.append(word)
+            groups.append(cur_group)
+
+            for group in groups:
+                x0  = min(w['x0']     for w in group)
+                x1  = max(w['x1']     for w in group)
+                top = min(w['top']    for w in group)
+                bot = max(w['bottom'] for w in group)
+                txt = ' '.join(w['text'] for w in group)
+                sizes = [w['size'] for w in group if w.get('size')]
+                font_size = normalize_font_size(max(sizes) if sizes else 0)
+                alignment = infer_alignment(x0, x1, page.width)
+                elements.append({
+                    'type': 'text', 'bbox': (x0, top, x1, bot),
+                    'data': txt, 'font_size': font_size, 'alignment': alignment,
+                })
 
     # y 오름차순 → x 오름차순 정렬
     elements.sort(key=lambda e: (e['bbox'][1], e['bbox'][0]))
@@ -306,7 +410,7 @@ def convert_pdf_to_excel(pdf_path: str, lang: str = "kor+eng") -> bytes:
         # 첫 페이지 너비 기준으로 컬럼 너비 비례 설정
         # PDF pt → Excel 문자 단위: A4(595pt) 기준 전체 너비 ≈ 85 chars
         first_page_width = pdf.pages[0].width if pdf.pages else 595
-        total_excel_width = first_page_width * 0.143   # pt → Excel char 단위
+        total_excel_width = first_page_width * 0.185   # pt → Excel char 단위
         col_width = round(total_excel_width / NUM_COLS, 1)
         for c in range(1, NUM_COLS + 1):
             ws.column_dimensions[get_column_letter(c)].width = col_width
@@ -321,19 +425,24 @@ def convert_pdf_to_excel(pdf_path: str, lang: str = "kor+eng") -> bytes:
                 render_pages.add(i)
 
         if render_pages:
-            all_renders = convert_from_path(
-                pdf_path, dpi=180,
-                first_page=min(render_pages) + 1,
-                last_page=max(render_pages) + 1,
-            )
-            # first_page 오프셋 보정
-            offset = min(render_pages)
-            for idx, img in enumerate(all_renders):
-                page_imgs[offset + idx] = img
+            fitz_doc = fitz.open(pdf_path)
+            for pi in render_pages:
+                fitz_page = fitz_doc[pi]
+                mat = fitz.Matrix(180 / 72, 180 / 72)
+                pix = fitz_page.get_pixmap(matrix=mat)
+                page_imgs[pi] = PILImage.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            fitz_doc.close()
 
         for page_num, page in enumerate(pdf.pages, start=1):
-            pi = page_num - 1  # 0-indexed
+            pi = page_num - 1
             page_img = page_imgs.get(pi)
+            page_start_row = current_row
+            # A4 기준 y좌표 → Excel 행 매핑: 14pt 행 높이 기준
+            ROW_HEIGHT_PT = 14
+            rows_per_page = max(60, int(page.height / ROW_HEIGHT_PT))
+
+            def y_to_row(y):
+                return page_start_row + max(0, int(y / page.height * rows_per_page))
 
             if is_scanned_page(page) and page_img:
                 text = ocr_page(page_img, lang)
@@ -348,56 +457,70 @@ def convert_pdf_to_excel(pdf_path: str, lang: str = "kor+eng") -> bytes:
                 plan = build_render_plan(elements)
 
                 for item in plan:
+                    # y좌표 기반으로 목표 행 결정 (뒤로 가지 않음)
+                    target_row = y_to_row(item['y'])
+                    current_row = max(current_row, target_row)
+
                     if item['kind'] == 'table':
                         elem = item['elem']
                         col_s, col_e = bbox_to_cols(elem['bbox'][0], elem['bbox'][2], page.width, NUM_COLS)
                         end_row = write_table(ws, elem['data'], current_row, col_s, col_e,
-                                              row_heights=elem.get('row_heights'))
+                                              row_heights=elem.get('row_heights'),
+                                              col_boundaries=elem.get('col_boundaries'))
                         current_row = end_row + 1
 
                     elif item['kind'] == 'band':
                         band = item['band']
-
-                        # 텍스트 요소는 고유 y 위치 기준으로 서브행 배정
                         text_elems = [e for e in band if e['type'] == 'text']
                         img_elems  = [e for e in band if e['type'] == 'image']
 
-                        # 텍스트 줄별 y → 서브행 인덱스 + 행 높이 매핑
+                        # 텍스트 줄별 y → 서브행 (같은 band 내에서만)
                         unique_tops = sorted(set(round(e['bbox'][1]) for e in text_elems))
                         top_to_subrow = {t: i for i, t in enumerate(unique_tops)}
                         text_rows = len(unique_tops) if unique_tops else 1
 
-                        # 서브행별 높이: 해당 줄 요소들의 bbox 높이 최댓값 (PDF pt ≈ Excel pt)
                         subrow_height = {}
                         for e in text_elems:
                             si = top_to_subrow.get(round(e['bbox'][1]), 0)
                             h = max(10, e['bbox'][3] - e['bbox'][1])
                             subrow_height[si] = max(subrow_height.get(si, 0), h)
 
-                        # 이미지: 총 높이 기반 행 수 계산
                         img_rows = 1
-                        img_total_h = 0
-                        for e in img_elems:
-                            h_pt = e['bbox'][3] - e['bbox'][1]
-                            img_total_h = max(img_total_h, h_pt)
+                        img_total_h = max((e['bbox'][3] - e['bbox'][1] for e in img_elems), default=0)
                         if img_total_h > 0:
-                            img_rows = max(1, int(img_total_h / 14))
+                            img_rows = max(1, int(img_total_h / ROW_HEIGHT_PT))
 
                         band_rows = max(text_rows, img_rows)
 
-                        # 텍스트: 각 줄을 해당 서브행에 배치 + bbox 범위만큼 셀 병합
                         for elem in text_elems:
                             col_s, col_e = bbox_to_cols(elem['bbox'][0], elem['bbox'][2], page.width, NUM_COLS)
+                            # 우측 정렬 텍스트: 빈 셀 확인 후 왼쪽 확장
+                            if elem.get('alignment') == 'right' and col_e >= NUM_COLS - 3:
+                                from openpyxl.cell.cell import MergedCell as MC
+                                subrow_tmp = top_to_subrow.get(round(elem['bbox'][1]), 0)
+                                r_tmp = current_row + subrow_tmp
+                                txt_len = len(str(elem['data']))
+                                needed = max(4, txt_len // 4 + 2)
+                                new_col_s = max(1, col_e - needed + 1)
+                                candidate = ws.cell(row=r_tmp, column=new_col_s)
+                                if not isinstance(candidate, MC) and candidate.value is None:
+                                    col_s = new_col_s
+                                col_e = NUM_COLS
                             subrow = top_to_subrow.get(round(elem['bbox'][1]), 0)
                             r = current_row + subrow
                             if col_e > col_s:
-                                ws.merge_cells(start_row=r, start_column=col_s,
-                                               end_row=r,   end_column=col_e)
-                            cell = ws.cell(row=r, column=col_s, value=safe_value(elem['data']))
-                            cell.font = Font(size=9)
-                            cell.alignment = Alignment(vertical="center", wrap_text=True)
+                                safe_merge(ws, r, col_s, r, col_e)
+                            raw_cell = ws.cell(row=r, column=col_s)
+                            from openpyxl.cell.cell import MergedCell
+                            if isinstance(raw_cell, MergedCell):
+                                continue
+                            raw_cell.value = safe_value(elem['data'])
+                            raw_cell.font = Font(size=elem.get('font_size', 9))
+                            raw_cell.alignment = Alignment(
+                                horizontal=elem.get('alignment', 'left'),
+                                vertical="center", wrap_text=True
+                            )
 
-                        # 이미지: 첫 행에 삽입
                         for elem in img_elems:
                             col_s, col_e = bbox_to_cols(elem['bbox'][0], elem['bbox'][2], page.width, NUM_COLS)
                             img_buf = io.BytesIO()
@@ -410,13 +533,18 @@ def convert_pdf_to_excel(pdf_path: str, lang: str = "kor+eng") -> bytes:
                             xl_img.height = int(h_pt * 1.8)
                             ws.add_image(xl_img, f"{get_column_letter(col_s)}{current_row}")
 
-                        # 서브행별 높이 적용 (PDF pt → Excel pt 직접 사용, 최소 10)
                         for si in range(band_rows):
-                            row_h = subrow_height.get(si, 14)
+                            row_h = subrow_height.get(si, ROW_HEIGHT_PT)
                             ws.row_dimensions[current_row + si].height = max(10, row_h)
-                        current_row += band_rows + 1
 
-            current_row += 2  # 페이지 여백
+                        current_row += band_rows
+
+            # A4 페이지 영역 테두리
+            page_end_row = page_start_row + rows_per_page - 1
+            draw_page_border(ws, page_start_row, page_end_row, 1, NUM_COLS)
+
+            # 다음 페이지는 현재 페이지 끝 행 이후부터
+            current_row = max(current_row, page_start_row + rows_per_page) + 2
 
     out = io.BytesIO()
     wb.save(out)

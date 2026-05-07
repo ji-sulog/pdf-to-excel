@@ -1,10 +1,12 @@
 import os
+import io
 import uuid
 import shutil
 from pathlib import Path
 
+import fitz
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from converter import convert_pdf_to_excel
@@ -20,6 +22,20 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 @app.get("/", response_class=HTMLResponse)
 async def index():
     return FileResponse("static/index.html")
+
+
+@app.post("/preview-pdf")
+async def preview_pdf(file: UploadFile = File(...)):
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="PDF 파일만 업로드 가능합니다.")
+    data = await file.read()
+    doc = fitz.open(stream=data, filetype="pdf")
+    page = doc[0]
+    mat = fitz.Matrix(1.0, 1.0)  # 72 DPI
+    pix = page.get_pixmap(matrix=mat)
+    doc.close()
+    jpeg = pix.tobytes("jpeg", jpg_quality=70)
+    return Response(content=jpeg, media_type="image/jpeg")
 
 
 @app.post("/convert")

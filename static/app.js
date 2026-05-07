@@ -30,6 +30,9 @@ let downloadUrl = null;
 let downloadFileName = null;
 let excelBlob = null;
 
+const pdfThumbnailWrap = document.getElementById('pdfThumbnailWrap');
+const pdfThumbnail = document.getElementById('pdfThumbnail');
+
 function formatBytes(bytes) {
   if (bytes < 1024) return bytes + ' B';
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
@@ -53,6 +56,7 @@ function setFile(file) {
   filePreview.classList.remove('hidden');
   convertBtn.disabled = false;
   resetResult();
+  loadPdfThumbnail(file);
 }
 
 function resetFile() {
@@ -71,6 +75,22 @@ function resetResult() {
   downloadUrl = null;
   downloadFileName = null;
   excelBlob = null;
+}
+
+async function loadPdfThumbnail(file) {
+  pdfThumbnailWrap.classList.add('hidden');
+  pdfThumbnail.src = '';
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
+    const res = await fetch('/preview-pdf', { method: 'POST', body: formData });
+    if (!res.ok) return;
+    const blob = await res.blob();
+    pdfThumbnail.src = URL.createObjectURL(blob);
+    pdfThumbnailWrap.classList.remove('hidden');
+  } catch (e) {
+    // 썸네일 실패는 조용히 무시
+  }
 }
 
 // 드래그앤드롭
@@ -130,36 +150,36 @@ function openPreview() {
         return;
       }
 
-      // 통계
+      // 병합 셀 맵 구성
+      const merges = sheet['!merges'] || [];
+      const mergeMap = {};
+      for (const { s, e } of merges) {
+        for (let r = s.r; r <= e.r; r++) {
+          if (!mergeMap[r]) mergeMap[r] = {};
+          for (let c = s.c; c <= e.c; c++) {
+            mergeMap[r][c] = (r === s.r && c === s.c)
+              ? { rowspan: e.r - s.r + 1, colspan: e.c - s.c + 1 }
+              : 'skip';
+          }
+        }
+      }
+
       const totalCols = Math.max(...rows.map(r => r.length));
       const dataRows = rows.filter(r => r.some(c => c !== '')).length;
       previewInfo.textContent = `${dataRows}행 × ${totalCols}열`;
 
-      // 테이블 생성
       let html = '<div class="preview-table-wrap"><table class="preview-table">';
-
       rows.forEach((row, ri) => {
-        const firstCell = String(row[0] || '');
-        const isPageHeader = firstCell.startsWith('[ ') && firstCell.endsWith(' ]');
-
-        if (isPageHeader) {
-          html += `<tr class="preview-page-header"><td colspan="${totalCols}">${escapeHtml(firstCell)}</td></tr>`;
-          return;
-        }
-
-        // 첫 번째 데이터 행 이후 헤더 스타일 감지 (배경색 파란 행)
-        const isHeader = ri > 0 && rows[ri - 1]?.[0] !== undefined &&
-          String(rows[ri - 1][0]).startsWith('[ ') && row.some(c => c !== '');
-
-        const tag = isHeader ? 'th' : 'td';
         html += '<tr>';
         for (let ci = 0; ci < totalCols; ci++) {
+          const m = mergeMap[ri]?.[ci];
+          if (m === 'skip') continue;
           const val = row[ci] !== undefined ? row[ci] : '';
-          html += `<${tag}>${escapeHtml(String(val))}</${tag}>`;
+          const attrs = m ? ` rowspan="${m.rowspan}" colspan="${m.colspan}"` : '';
+          html += `<td${attrs}>${escapeHtml(String(val))}</td>`;
         }
         html += '</tr>';
       });
-
       html += '</table></div>';
       previewContent.innerHTML = html;
     } catch (err) {
